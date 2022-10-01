@@ -1,0 +1,108 @@
+version: 2.1
+  
+parameters:
+  trigger-workflows:
+    type: boolean
+    default: true
+  run-project1-workflow:
+    type: boolean
+    default: false
+  run-project2-workflow:
+    type: boolean
+    default: false
+  docker-version:
+    description: "Available Versions - https://circleci.com/docs/2.0/building-docker-images/#docker-version"
+    type: string
+    default: 19.03.13
+  rubygems-cache-key:
+    type: string
+    default: gem-cache-v20220818-{{ arch }}-{{ checksum "Gemfile.lock" }}
+
+executors:
+  docker_ruby:
+    docker:
+      - image: cimg/ruby:3.1.2
+    working_directory: ~/monorepo
+  linux_vm:
+    machine:
+      image: ubuntu-2204:2022.07.1
+    working_directory: ~/monorepo
+
+commands:
+  autocancel_redundant_workflows:
+    steps:
+      - run: 
+          name: Cancel Redundant Workflows
+          command: ./bin/circleci-autocancel-redundant-workflows
+
+  monorepo_setup_environment:
+    steps:
+      - checkout
+      - autocancel_redundant_workflows
+
+  monorepo_setup_remote_docker:
+    parameters:
+      enable_dlc:
+        type: boolean
+        default: false
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: << parameters.enable_dlc >>
+          version: << pipeline.parameters.docker-version >>
+
+jobs:
+  trigger_workflows:
+    executor: docker_ruby
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: Trigger Workflows
+          command: |
+            ./bin/circleci-trigger
+
+  build_test_deploy_project1:
+    executor: docker_ruby
+    resource_class: small
+    steps:
+      - monorepo_setup_environment
+      - monorepo_setup_remote_docker
+      - run:
+          name: Building Project 1
+          command: |
+            docker build -f src/project1/Dockerfile src/project1 -t monorepo/project1:latest
+  
+  build_test_deploy_project2:
+    executor: docker_ruby
+    resource_class: small
+    steps:
+      - monorepo_setup_environment
+      - monorepo_setup_remote_docker
+      - run:
+          name: Building Project 1
+          command: |
+            docker build -f src/project2/Dockerfile src/project1 -t monorepo/project2:latest
+  
+workflows:
+  version: 2
+
+  ci:
+    when: 
+      or:
+        - << pipeline.parameters.trigger-workflows >>
+    jobs:
+      - trigger_workflows
+
+  project1:
+    when: 
+      or:
+        - << pipeline.parameters.run-project1-workflow >>
+    jobs:
+      - build_test_deploy_project1
+
+  project2:
+    when: 
+      or:
+        - << pipeline.parameters.run-project2-workflow >>
+    jobs:
+      - build_test_deploy_project2

@@ -1,0 +1,93 @@
+#!/usr/bin/env ruby
+
+require 'json'
+require 'uri'
+require 'net/http'
+require 'openssl'
+require 'date'
+require 'set'
+
+# Usage:
+
+# $ CIRCLE_PROJECT_USERNAME=orgname \
+#   CIRCLE_PROJECT_REPONAME=reponame \
+#   CIRCLECI=true \
+#   CIRCLE_TOKEN=$CIRCLE_TOKEN \
+#   WORKFLOW=run-project1-e2e-workflow \
+#   ./bin/circleci-single-workflow
+
+module Monorepo
+  def self.check_pre_reqs
+    raise "You need to run this in a CircleCI environment 😜 (Set CIRCLECI)" unless ENV.key?('CIRCLECI')
+    raise "You need to set CIRCLE_TOKEN 😜" unless ENV.key?('CIRCLE_TOKEN')
+    raise "You need to set WORKFLOW 😜" unless ENV.key?('WORKFLOW')
+  end
+
+  def self.workflow
+    ENV['WORKFLOW']
+  end
+
+  def self.username
+    ENV['CIRCLE_PROJECT_USERNAME']
+  end
+  
+  def self.reponame
+    ENV['CIRCLE_PROJECT_REPONAME'] || `basename -s .git \`git config --get remote.origin.url\``.chomp
+  end
+
+  # Project slug in the form vcs-slug/org-name/repo-name. The / characters may be URL-escaped.
+  # Example: gh/CircleCI-Public/api-preview-docs
+  def self.project_slug
+    "gh/#{username}/#{reponame}"
+  end
+
+  def self.trigger_pipeline
+    body = {
+      'parameters' => {
+        'trigger-workflows' => false, 
+        workflow => true
+      }
+    }
+    
+    body.merge!( { 'branch' => ENV['CIRCLE_BRANCH'] } ) if ENV.key?('CIRCLE_BRANCH')
+
+    call_api(
+      route: "project/#{project_slug}/pipeline",
+      body: body.to_json,
+      method: 'post'
+    )
+  end
+
+  def self.log(msg='')
+    puts msg
+  end
+
+  def self.call_api(route:, method: 'get', body: '')
+    base_url = 'https://circleci.com/api/v2'
+
+    url = URI("#{base_url}/#{route}")
+
+    http = Net::HTTP.new(url.host, url.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    klass = Module.const_get("Net::HTTP::#{method.capitalize}")
+
+    request = klass.new(url)
+    request["content-type"] = 'application/json'
+    request["Circle-Token"] = ENV['CIRCLE_TOKEN']
+    request.body = body
+
+    response = http.request(request)
+    JSON.parse(response.read_body)
+  end
+
+  def self.main
+    check_pre_reqs
+    
+    response = trigger_pipeline
+    log "API Response: #{response}"
+  end
+end
+
+Monorepo.main

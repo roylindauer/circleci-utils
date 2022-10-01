@@ -1,0 +1,252 @@
+#!/usr/bin/env ruby
+
+require 'json'
+require 'uri'
+require 'net/http'
+require 'openssl'
+require 'date'
+require 'set'
+
+class Array
+  def intersects?(array)
+    !(self.intersection(array)).empty?
+  end
+end
+
+# Usage:
+
+# $ CIRCLE_PROJECT_USERNAME=orgname \
+#   CIRCLE_PROJECT_REPONAME=reponame \
+#   CIRCLECI=true \
+#   CIRCLE_BRANCH=develop \
+#   CIRCLE_TOKEN=$CIRCLE_TOKEN \
+#   ./bin/circleci-trigger
+
+module Monorepo
+
+  IGNORE_TRIGGER_PARAMETERS = %w(run-project1-e2e-workflow run-project2-e2e-workflow)
+  FAILED_WORKFLOW_STATUS = %w(failed running canceled)
+
+  def self.check_pre_reqs
+    raise "You need to run this in a CircleCI environment 😜 (Set CIRCLECI)" unless ENV.key?('CIRCLECI')
+    raise "You need to set CIRCLE_TOKEN 😜" unless ENV.key?('CIRCLE_TOKEN')
+  end
+
+  def self.username
+    ENV['CIRCLE_PROJECT_USERNAME']
+  end
+  
+  def self.reponame
+    ENV['CIRCLE_PROJECT_REPONAME'] || `basename -s .git \`git config --get remote.origin.url\``.chomp
+  end
+
+  @path_filter_mapping = nil
+  def self.path_filter_mapping
+    @path_filter_mapping ||= {
+      '.circleci/.*' => { 'run-ops-workflow' => true },
+      'bin/.*' => { 'run-ops-workflow' => true },
+      'build/.*' => { 'run-ops-workflow' => true },
+      'infrastructure/.*' => { 'run-infrastructure-workflow' => true },
+      'src/project1/.*' => { 'run-project1-workflow' => true },
+      'src/project2/.*' => { 'run-project2-workflow' => true }
+    }
+  end
+
+  def self.no_pager
+    '--no-pager'
+  end
+
+  def self.git_remote
+    `git #{no_pager} remote show`.chomp
+  end
+
+  # Project slug in the form vcs-slug/org-name/repo-name. The / characters may be URL-escaped.
+  # Example: gh/CircleCI-Public/api-preview-docs
+  def self.project_slug
+    "gh/#{username}/#{reponame}"
+  end
+
+  def self.files_changed_in_commit_range(head:, base_revision:)
+    diff_commits = "#{base_revision}...#{head}"
+    cmd = ['git', no_pager, 'diff', '--name-only', diff_commits]
+    files = `#{cmd.join(' ')}`.split("\n")
+    log "Changed Files:\n#{files.join("\n")}"
+    files
+  end
+
+  def self.set_pipeline_parameters(head:, base_revision:)
+    parameters = {'trigger-workflows' => false}
+
+    files_changed_in_commit_range(head: head, base_revision: base_revision).each do | file_path | 
+      path_filter_mapping.each do | path_filter, map |
+        parameters.merge!(map) if file_path.match(/#{path_filter}/)
+      end
+    end
+
+    result = { parameters: parameters }
+    result.merge!( { branch: ENV['CIRCLE_BRANCH'] } ) if ENV.key?('CIRCLE_BRANCH')
+    result.merge!( { tag: ENV['CIRCLE_TAG'] } ) if ENV.key?('CIRCLE_TAG')
+    result.reject! { | k, h | h.nil? || h.empty? }
+
+    log "Pipeline Parameters: #{result}"
+
+    result
+  end
+  
+  def self.trigger_pipeline(head:, base_revision:)
+    parameters = set_pipeline_parameters(head: head, base_revision: base_revision)
+
+    call_api(route: "project/#{project_slug}/pipeline", body: parameters.to_json, method: 'post')
+  end
+
+  def self.call_api(route:, method: 'get', body: '')
+    base_url = 'https://circleci.com/api/v2'
+
+    url = URI("#{base_url}/#{route}")
+
+    http = Net::HTTP.new(url.host, url.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    klass = Module.const_get("Net::HTTP::#{method.capitalize}")
+
+    request = klass.new(url)
+    request["content-type"] = 'application/json'
+    request["Circle-Token"] = ENV['CIRCLE_TOKEN']
+    request.body = body
+
+    response = http.request(request)
+    JSON.parse(response.read_body)
+  end
+
+  def self.find_current_branch
+    current_branch = ENV['CIRCLE_BRANCH']
+    current_branch = ENV['CIRCLE_TAG'] unless current_branch
+    current_branch = `git #{no_pager} branch --show-current`.chomp unless current_branch
+    current_branch
+  end
+
+  def self.get_base_revision(remote:)
+    log "Getting base revision"
+
+    # Manually set a base revision
+    base = ENV['BASE_REVISION'] if ENV.key?('BASE_REVISION')
+
+    # Set current branch
+    current_branch = find_current_branch
+
+    # To ensure that all workflows run we set base revision to the last successful workflow for this branch
+    if %w(develop staging prod).include?(current_branch)
+      log "Looking for commit of the last successful build for branch #{current_branch}"
+      base = find_last_successful_commit(branch: current_branch)
+    end
+
+    # We do not care about pull requests, but if we did we would 
+    # do that here first since it will take less effort to get the base
+    # if pull_request?
+    #   puts "Is a Pull Request - Looking for head commit from target branch"
+    #   base = find_commit_from_pr
+    # end
+
+    # Look for first commit shared between multiple branches
+    unless base
+      if ENV['CIRCLE_TAG']
+        remote = 'tags'
+      end
+
+      log "Looking for first commit shared in multiple branches"
+      base = find_parent_commit(branch: current_branch, remote: remote)
+    end
+
+    unless base
+      log "Did not find a commit, defaulting to HEAD~1"
+      base = 'HEAD~1'
+    end
+
+    return base
+  end
+
+  def self.find_last_successful_commit(branch:)
+    branch_pipelines = call_api(route: "project/#{project_slug}/pipeline?branch=#{branch}")
+    current_revision = `git #{no_pager} rev-parse HEAD`.chomp
+
+    log "Found #{branch_pipelines['items'].length} Pipelines for Branch #{branch}"
+    log "Current Revision: #{current_revision}"
+
+    branch_pipelines['items'].each do | pipeline |
+      # Ignore pipelines with the same commit as our current revision since this may be a re-run due to an error or failure
+      next if pipeline['vcs']['revision'] == current_revision
+    
+      # The trigger-workflows job will generally be successful and not have run any other workflows so let's ignore those
+      # We are only concerned about checking on pipelines where we built something
+      # and those are only going to be from api triggers, ui triggers, or maybe scheduled triggers. 
+      next if pipeline['trigger']['type'] == 'webhook'
+
+      # Ignore pipeline if any items were triggered with specific parameters
+      next if pipeline.key?('trigger_parameters') && pipeline['trigger_parameters'].intersects?(IGNORE_TRIGGER_PARAMETERS)
+
+      workflows = call_api(route: "pipeline/#{pipeline['id']}/workflow")
+      status = workflows['items'].map { | item | item['status'] }
+
+      log "Checking Pipeline #{pipeline['number']} (#{pipeline['id']}) for any failed workflows"
+      log "Status: #{status}"
+
+      return pipeline['vcs']['revision'] if !status.intersects?(FAILED_WORKFLOW_STATUS)
+    end
+    false
+  end
+  
+  def self.find_parent_commit(branch:, remote: false)
+    if remote && !remote.end_with?('/')
+      remote += '/'
+    end
+
+    time_limit = "--after #{Date.today.prev_month} --before #{Date.today}"
+    cmd = ['git', no_pager, 'rev-list', '--first-parent', time_limit, "#{remote}#{branch}"]
+
+    commits = `#{cmd.join(' ')}`.split("\n")
+
+    log "Looking through #{commits.length} commits"
+
+    commits.each do | commit |
+      cmd = ['git', no_pager, 'branch', '--contains', commit]
+      log "Checking commit #{commit}"
+
+      branches = `#{cmd.join(' ')}`.split("\n")
+
+      if branches.length > 1
+        log "Commit #{commit} present in: #{branches}"
+        return commit
+      end
+    end
+
+    # we should/could check recursively by date range...
+
+    false
+  end
+
+  def self.log(msg='')
+    puts msg
+  end
+  
+  def self.main
+    check_pre_reqs
+
+    remote = git_remote
+    log "Remote: #{remote}"
+
+    base_revision = get_base_revision(remote: remote)
+    log "Base Revision: #{base_revision}"
+
+    head = ENV.key?('CIRCLE_SHA1') ? ENV['CIRCLE_SHA1'] : 'HEAD'
+    log "Head: #{head}"
+
+    response = trigger_pipeline(head: head, base_revision: base_revision)
+    log "API Response: #{response}"
+
+  rescue => e
+    puts e.message
+  end
+end
+
+Monorepo::main

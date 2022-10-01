@@ -1,0 +1,104 @@
+#!/usr/bin/env ruby
+
+require 'json'
+require 'uri'
+require 'net/http'
+require 'openssl'
+require 'date'
+require 'set'
+
+# What is this?
+# CircleCI has a feature that will auto cancel redundant builds for an entire branch.
+# It will not cancel any builds for the default branch.
+# What we want is to cancel redundant workflows instead.
+
+# Usage:
+
+# $ CIRCLE_PROJECT_USERNAME=orgname \
+#   CIRCLE_PROJECT_REPONAME=reponame \
+#   CIRCLECI=true \
+#   CIRCLE_BRANCH=<CURRENT_BRANCH> \
+#   CIRCLE_TOKEN=<CIRCLE_API_TOKEN> \
+#   CIRCLE_WORKFLOW_ID=<WORKFLOW_UUID> \
+#   ./bin/circleci-autocancel-redundant-workflows
+
+module Monorepo
+
+  EXCLUDE_BRANCHES = %w(develop)
+  EXCLUDE_WORKFLOWS = %w(project1-e2e project2-e2e)
+
+  def check_pre_reqs
+    raise "You need to run this in a CircleCI environment 😜 (Set CIRCLECI)" unless ENV.key?('CIRCLECI')
+    raise "You need to set CIRCLE_TOKEN 😜" unless ENV.key?('CIRCLE_TOKEN')
+    raise "You need to set CIRCLE_PROJECT_USERNAME 😜" unless ENV.key?('CIRCLE_PROJECT_USERNAME')
+    raise "You need to set CIRCLE_PROJECT_REPONAME 😜" unless ENV.key?('CIRCLE_PROJECT_REPONAME')
+  end
+
+  def branch
+    ENV['CIRCLE_BRANCH']
+  end
+
+  def project_slug
+    "gh/#{ENV['CIRCLE_PROJECT_USERNAME']}/#{ENV['CIRCLE_PROJECT_REPONAME']}"
+  end
+
+  def call_api(route:, method: 'get', body: '')
+    base_url = 'https://circleci.com/api/v2'
+
+    url = URI("#{base_url}/#{route}")
+
+    http = Net::HTTP.new(url.host, url.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    klass = Module.const_get("Net::HTTP::#{method.capitalize}")
+
+    request = klass.new(url)
+    request["content-type"] = 'application/json'
+    request["Circle-Token"] = ENV['CIRCLE_TOKEN']
+    request.body = body
+
+    response = http.request(request)
+    JSON.parse(response.read_body)
+  end
+
+  def get_workflows(pipeline_id, workflow_id, workflow_name)
+    ret = call_api(route: "pipeline/#{pipeline_id}/workflow")
+    ret['items'].select!{ | workflow | %w(on_hold running).include? workflow['status'] }
+    ret['items'].select!{ | workflow | workflow['id'] != workflow_id  }
+    ret['items'].select!{ | workflow | workflow['name'] == workflow_name  }
+    ret['items'].select!{ | workflow | !EXCLUDE_WORKFLOWS.include? workflow['name']  }
+
+    return ret['items'] unless ret.empty?
+  end
+
+  def main
+    check_pre_reqs
+
+    return if EXCLUDE_BRANCHES.include? branch 
+
+    current_workflow = call_api(route: "workflow/#{ENV['CIRCLE_WORKFLOW_ID']}")
+    puts "Found workflow `#{current_workflow['name']}`"
+
+    puts "Getting list of pipelines for branch `#{branch}`"
+    pipelines = call_api(route: "project/#{project_slug}/pipeline?branch=#{branch}")
+
+    puts "Discovering active workflows to cancel"
+    workflows_to_cancel = []
+    pipelines['items'].each do | pipeline |
+      workflows_to_cancel << get_workflows(pipeline['id'], current_workflow['id'], current_workflow['name'])
+    end
+    workflows_to_cancel.filter! { | w | !w.nil? && !w.empty? }
+    workflows_to_cancel.flatten!
+
+    puts "No workflows to cancel" if workflows_to_cancel.empty?
+
+    workflows_to_cancel.each do | workflow |
+      puts "Cancelling Workflow (#{workflow['name']}) - #{workflow['id']}"
+      call_api(route: "workflow/#{workflow['id']}/cancel", method: 'POST')
+    end
+
+  end
+end
+
+Monorepo.main
