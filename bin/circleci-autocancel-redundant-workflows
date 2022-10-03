@@ -101,4 +101,4 @@ module Monorepo
   end
 end
 
-Monorepo.main
+Monorepo::main
