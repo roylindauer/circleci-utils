@@ -27,22 +27,22 @@ module Monorepo
   EXCLUDE_BRANCHES = %w(develop)
   EXCLUDE_WORKFLOWS = %w(project1-e2e project2-e2e)
 
-  def check_pre_reqs
+  def self.check_pre_reqs
     raise "You need to run this in a CircleCI environment 😜 (Set CIRCLECI)" unless ENV.key?('CIRCLECI')
     raise "You need to set CIRCLE_TOKEN 😜" unless ENV.key?('CIRCLE_TOKEN')
     raise "You need to set CIRCLE_PROJECT_USERNAME 😜" unless ENV.key?('CIRCLE_PROJECT_USERNAME')
     raise "You need to set CIRCLE_PROJECT_REPONAME 😜" unless ENV.key?('CIRCLE_PROJECT_REPONAME')
   end
 
-  def branch
+  def self.branch
     ENV['CIRCLE_BRANCH']
   end
 
-  def project_slug
+  def self.project_slug
     "gh/#{ENV['CIRCLE_PROJECT_USERNAME']}/#{ENV['CIRCLE_PROJECT_REPONAME']}"
   end
 
-  def call_api(route:, method: 'get', body: '')
+  def self.call_api(route:, method: 'get', body: '')
     base_url = 'https://circleci.com/api/v2'
 
     url = URI("#{base_url}/#{route}")
@@ -62,7 +62,7 @@ module Monorepo
     JSON.parse(response.read_body)
   end
 
-  def get_workflows(pipeline_id, workflow_id, workflow_name)
+  def self.get_workflows(pipeline_id, workflow_id, workflow_name)
     ret = call_api(route: "pipeline/#{pipeline_id}/workflow")
     ret['items'].select!{ | workflow | %w(on_hold running).include? workflow['status'] }
     ret['items'].select!{ | workflow | workflow['id'] != workflow_id  }
@@ -72,7 +72,7 @@ module Monorepo
     return ret['items'] unless ret.empty?
   end
 
-  def main
+  def self.main
     check_pre_reqs
 
     return if EXCLUDE_BRANCHES.include? branch 
