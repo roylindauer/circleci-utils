@@ -46,7 +46,6 @@ module Monorepo
       '.circleci/.*' => { 'run-ops-workflow' => true },
       'bin/.*' => { 'run-ops-workflow' => true },
       'build/.*' => { 'run-ops-workflow' => true },
-      'infrastructure/.*' => { 'run-infrastructure-workflow' => true },
       'src/project1/.*' => { 'run-project1-workflow' => true },
       'src/project2/.*' => { 'run-project2-workflow' => true }
     }

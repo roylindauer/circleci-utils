@@ -4,6 +4,9 @@ parameters:
   trigger-workflows:
     type: boolean
     default: true
+  run-ops-workflow:
+    type: boolean
+    default: false
   run-project1-workflow:
     type: boolean
     default: false
@@ -61,6 +64,16 @@ jobs:
           command: |
             ./bin/circleci-trigger
 
+  ops_job:
+    executor: docker_ruby
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: Ops Jobs
+          command: |
+            echo "Would be doing ops things..."
+
   build_test_deploy_project1:
     executor: docker_ruby
     resource_class: small
@@ -92,6 +105,13 @@ workflows:
         - << pipeline.parameters.trigger-workflows >>
     jobs:
       - trigger_workflows
+
+  ops:
+    when:
+      or:
+        - << pipeline.parameters.run-ops-workflow >>
+    jobs:
+      - ops_job
 
   project1:
     when: 
