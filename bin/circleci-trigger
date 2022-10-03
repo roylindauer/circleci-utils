@@ -135,7 +135,7 @@ module Monorepo
     current_branch = find_current_branch
 
     # To ensure that all workflows run we set base revision to the last successful workflow for this branch
-    if %w(develop staging prod).include?(current_branch)
+    if %w(develop main).include?(current_branch)
       log "Looking for commit of the last successful build for branch #{current_branch}"
       base = find_last_successful_commit(branch: current_branch)
     end
