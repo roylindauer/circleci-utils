@@ -8,3 +8,4 @@ Name = CIRCLE_TOKEN
 Value = <YOUR_API_TOKEN>
 ```
 
+Reference: https://www.roylindauer.com/blog/execute-workflows-with-path-filtering-in-circleci.html
